@@ -168,6 +168,124 @@ SUBJECTS = [
     "SPORTS - I"
 ]
 
+CLASS_TYPES = ["LECTURE", "TUTORIAL", "PRACTICAL", "STUDIO"]
+
+
+def get_timetable_file():
+    app = App.get_running_app()
+    return os.path.join(app.user_data_dir, "timetable.json")
+
+
+def _default_timetable_data():
+    """Convert the original timetable into the new user-editable format."""
+    data = {}
+    for day, slots in TIMETABLE.items():
+        data[day] = []
+        for subject in slots:
+            if subject and subject != "LUNCH BREAK":
+                data[day].append({"subject": subject, "type": "LECTURE"})
+            elif subject == "LUNCH BREAK":
+                data[day].append({"subject": "LUNCH BREAK", "type": ""})
+            else:
+                data[day].append({"subject": "", "type": ""})
+    return data
+
+
+def _normalise_timetable(data):
+    """Accept both the old string format and the new slot-object format."""
+    result = {}
+    defaults = _default_timetable_data()
+    for day in ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"):
+        raw_slots = data.get(day, defaults.get(day, [])) if isinstance(data, dict) else []
+        result[day] = []
+        for index in range(len(TIMES)):
+            value = raw_slots[index] if index < len(raw_slots) else {"subject": "", "type": ""}
+            if isinstance(value, str):
+                subject = value
+                class_type = "LECTURE" if subject and subject != "LUNCH BREAK" else ""
+                result[day].append({"subject": subject, "type": class_type})
+            elif isinstance(value, dict):
+                subject = str(value.get("subject", "") or "")
+                class_type = str(value.get("type", "") or "").upper()
+                if subject and subject != "LUNCH BREAK":
+                    if class_type not in CLASS_TYPES:
+                        class_type = "LECTURE"
+                else:
+                    class_type = ""
+                result[day].append({"subject": subject, "type": class_type})
+            else:
+                result[day].append({"subject": "", "type": ""})
+    return result
+
+
+def load_timetable():
+    filename = get_timetable_file()
+    try:
+        if os.path.exists(filename):
+            with open(filename, "r") as file:
+                data = json.load(file)
+            normalised = _normalise_timetable(data)
+            # Silently migrate old/string timetable files to the new format.
+            if data != normalised:
+                save_timetable(normalised)
+            return normalised
+    except Exception as e:
+        print("Could not load timetable:", e)
+
+    data = _default_timetable_data()
+    try:
+        save_timetable(data)
+    except Exception:
+        pass
+    return data
+
+
+def save_timetable(data):
+    filename = get_timetable_file()
+    try:
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "w") as file:
+            json.dump(_normalise_timetable(data), file, indent=4)
+        app = App.get_running_app()
+        if app is not None:
+            app.timetable_data = _normalise_timetable(data)
+    except Exception as e:
+        print("Could not save timetable:", e)
+
+
+def get_timetable():
+    app = App.get_running_app()
+    data = getattr(app, "timetable_data", None)
+    if data is None:
+        data = load_timetable()
+        if app is not None:
+            app.timetable_data = data
+    return data
+
+
+def get_slot_entry(day, index):
+    timetable = get_timetable()
+    slots = timetable.get(day, [])
+    if index < len(slots):
+        value = slots[index]
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return {
+                "subject": value,
+                "type": "LECTURE" if value and value != "LUNCH BREAK" else ""
+            }
+    return {"subject": "", "type": ""}
+
+
+def get_slot_subject(day, index):
+    return get_slot_entry(day, index).get("subject", "")
+
+
+def get_slot_type(day, index):
+    return get_slot_entry(day, index).get("type", "")
+
+
 # ============================================================
 # SUBJECT INFORMATION
 # ============================================================
@@ -438,7 +556,18 @@ def load_attendance():
         if os.path.exists(filename):
 
             with open(filename, "r") as file:
-                return json.load(file)
+                data = json.load(file)
+            # Older attendance records had no class type. Preserve them as
+            # lectures so existing attendance remains valid.
+            changed = False
+            if isinstance(data, dict):
+                for record in data.values():
+                    if isinstance(record, dict) and not record.get("type"):
+                        record["type"] = "LECTURE"
+                        changed = True
+            if changed:
+                save_attendance(data)
+            return data
 
     except Exception:
         pass
@@ -473,22 +602,23 @@ def save_attendance(data):
 # ATTENDANCE CALCULATIONS
 # ============================================================
 
-def get_subject_stats(subject):
-
+def get_subject_stats(subject, class_type=None):
     data = App.get_running_app().attendance_data
 
     present = 0
     absent = 0
 
     for record in data.values():
+        if record.get("subject") != subject:
+            continue
+        record_type = str(record.get("type", "LECTURE") or "LECTURE").upper()
+        if class_type and record_type != class_type.upper():
+            continue
 
-        if record.get("subject") == subject:
-
-            if record.get("status") == "present":
-                present += 1
-
-            elif record.get("status") == "absent":
-                absent += 1
+        if record.get("status") == "present":
+            present += 1
+        elif record.get("status") == "absent":
+            absent += 1
 
     total = present + absent
 
@@ -497,6 +627,26 @@ def get_subject_stats(subject):
     else:
         percentage = (present / total) * 100
 
+    return present, absent, total, percentage
+
+
+def get_type_stats(class_type):
+    data = App.get_running_app().attendance_data
+    present = 0
+    absent = 0
+    wanted = class_type.upper()
+
+    for record in data.values():
+        record_type = str(record.get("type", "LECTURE") or "LECTURE").upper()
+        if record_type != wanted:
+            continue
+        if record.get("status") == "present":
+            present += 1
+        elif record.get("status") == "absent":
+            absent += 1
+
+    total = present + absent
+    percentage = (present / total * 100) if total else None
     return present, absent, total, percentage
 
 
@@ -1177,7 +1327,7 @@ class HomeScreen(Screen):
         if not timetable_day:
             return None
 
-        subjects = TIMETABLE.get(timetable_day, [])
+        subjects = [get_slot_subject(timetable_day, i) for i in range(len(TIMES))]
         current_minutes = now.hour * 60 + now.minute
 
         for index, subject in enumerate(subjects):
@@ -1194,6 +1344,7 @@ class HomeScreen(Screen):
                     "subject": subject,
                     "time": TIMES[index],
                     "date": today.isoformat(),
+                    "type": get_slot_type(timetable_day, index),
                     "state": "IN PROGRESS"
                 }
 
@@ -1210,6 +1361,7 @@ class HomeScreen(Screen):
                     "subject": subject,
                     "time": TIMES[index],
                     "date": today.isoformat(),
+                    "type": get_slot_type(timetable_day, index),
                     "state": "STARTING SOON"
                 }
 
@@ -1246,14 +1398,14 @@ class HomeScreen(Screen):
             status = record.get("status", "").upper()
             self.quick_attendance_label.text = (
                 f"{state}  •  {subject}\n"
-                f"{time}  •  MARKED {status}"
+                f"{time}  •  {class_info.get('type', 'LECTURE')}  •  MARKED {status}"
             )
             self.quick_present_button.disabled = True
             self.quick_absent_button.disabled = True
         else:
             self.quick_attendance_label.text = (
                 f"{state}  •  {subject}\n"
-                f"{time}  •  Tap PRESENT or ABSENT"
+                f"{time}  •  {class_info.get('type', 'LECTURE')}  •  Tap PRESENT or ABSENT"
             )
             self.quick_present_button.disabled = False
             self.quick_absent_button.disabled = False
@@ -1269,10 +1421,19 @@ class HomeScreen(Screen):
             f"{self.quick_attendance_time}"
         )
 
+        class_type = "LECTURE"
+        try:
+            info = self.get_home_attendance_class()
+            if info:
+                class_type = info.get("type") or "LECTURE"
+        except Exception:
+            pass
+
         app.attendance_data[key] = {
             "subject": self.quick_attendance_subject,
             "date": self.quick_attendance_date,
             "time": self.quick_attendance_time,
+            "type": class_type,
             "status": status
         }
         save_attendance(app.attendance_data)
@@ -1306,7 +1467,7 @@ class HomeScreen(Screen):
             if timetable_day is None:
                 self.today_classes.text = "NO CLASSES"
             else:
-                subjects = TIMETABLE.get(timetable_day, [])
+                subjects = [get_slot_subject(timetable_day, i) for i in range(len(TIMES))]
                 classes = []
                 for index, subject in enumerate(subjects):
                     if subject and subject != "LUNCH BREAK":
@@ -1528,7 +1689,16 @@ class SubjectsScreen(Screen):
             # Attendance is deliberately the largest visual element after the subject name.
             if total:
                 attendance_text = f"{percentage:.0f}%"
-                count_text = f"{present} present  •  {absent} absent  •  {total} marked"
+                type_parts = []
+                for class_type in CLASS_TYPES:
+                    tp, ta, tt, tpct = get_subject_stats(subject, class_type)
+                    if tt:
+                        type_parts.append(f"{class_type.title()}: {tpct:.0f}%")
+                type_summary = "  •  ".join(type_parts)
+                count_text = (
+                    f"{present} present  •  {absent} absent  •  {total} marked"
+                    + (f"\n{type_summary}" if type_summary else "")
+                )
                 att_color = UI_SUCCESS if percentage >= REQUIRED_ATTENDANCE else UI_DANGER
             else:
                 attendance_text = "—"
@@ -1723,7 +1893,7 @@ class SubjectDetailsScreen(Screen):
             halign="left",
             valign="middle",
             size_hint_y=None,
-            height=138
+            height=205
         )
         self.attendance_label.bind(
             size=lambda instance, value: setattr(
@@ -1856,12 +2026,28 @@ class SubjectDetailsScreen(Screen):
             skips = classes_can_skip(present, total)
             skip_text = f"Can skip: {skips} classes"
 
+        type_lines = []
+        for class_type in CLASS_TYPES:
+            tp, ta, tt, tpct = get_subject_stats(subject, class_type)
+            if tt:
+                type_pct = f"{tpct:.1f}%"
+                type_skip = classes_can_skip(tp, tt)
+                type_lines.append(
+                    f"{class_type}: {type_pct}   "
+                    f"{tp} present  •  {ta} absent  •  {tt} marked  •  "
+                    f"Can skip {type_skip}"
+                )
+            else:
+                type_lines.append(f"{class_type}: —   No classes marked")
+
         self.attendance_label.text = (
             f"Credits: {credits}\n"
-            f"Attendance: {percentage_text}\n"
+            f"OVERALL: {percentage_text}\n"
             f"Present: {present}    Absent: {absent}    Total: {total}\n"
             f"{skip_text}\n"
-            f"Required: {REQUIRED_ATTENDANCE}%"
+            f"Required: {REQUIRED_ATTENDANCE}%\n\n"
+            f"ATTENDANCE BY CLASS TYPE\n" +
+            "\n".join(type_lines)
         )
 
         syllabus = info.get("syllabus", [])
@@ -1981,12 +2167,14 @@ class AttendancePopup(Popup):
         subject,
         class_date,
         time,
+        class_type="LECTURE",
         **kwargs
     ):
 
         self.subject = subject
         self.class_date = class_date
         self.time = time
+        self.class_type = class_type or "LECTURE"
 
         content = BoxLayout(
             orientation="vertical",
@@ -2006,7 +2194,8 @@ class AttendancePopup(Popup):
             Label(
                 text=(
                     f"{class_date}\n"
-                    f"{time}"
+                    f"{time}\n"
+                    f"{self.class_type}"
                 ),
                 font_size=fs(29)
             )
@@ -2107,6 +2296,7 @@ class AttendancePopup(Popup):
             "subject": self.subject,
             "date": self.class_date,
             "time": self.time,
+            "type": self.class_type,
             "status": status
         }
 
@@ -2137,6 +2327,7 @@ class TimetableScreen(Screen):
         self.week_offset = 0
         self.selected_day_index = 0
         self.filter_mode = "ALL"
+        self.edit_mode = False
 
         self.main = BoxLayout(
             orientation="vertical",
@@ -2188,6 +2379,16 @@ class TimetableScreen(Screen):
         title_box.add_widget(self.title_label)
         title_box.add_widget(self.month_label)
         top.add_widget(title_box)
+
+        self.edit_button = AppButton(
+            text="EDIT",
+            font_size=fs(12),
+            bold=True,
+            size_hint_x=None,
+            width=70,
+        )
+        self.edit_button.bind(on_press=lambda x: self.toggle_edit_mode())
+        top.add_widget(self.edit_button)
 
         today = AppButton(
             text="TODAY",
@@ -2384,7 +2585,7 @@ class TimetableScreen(Screen):
         timetable_day = self.get_timetable_day(actual_date)
         if not timetable_day:
             return [""] * len(TIMES)
-        return TIMETABLE.get(timetable_day, [""] * len(TIMES))
+        return [get_slot_subject(timetable_day, i) for i in range(len(TIMES))]
 
     def attendance_record(self, actual_date, subject, time):
         key = f"{actual_date.isoformat()}|{subject}|{time}"
@@ -2498,7 +2699,7 @@ class TimetableScreen(Screen):
             # instead of collapsing and leaving a large unused area.
             if not subject:
                 if self.filter_mode == "ALL":
-                    self.add_empty_time_row(time)
+                    self.add_empty_time_row(timetable_day, index, time)
                 continue
 
             if subject == "LUNCH BREAK":
@@ -2514,7 +2715,9 @@ class TimetableScreen(Screen):
             if self.filter_mode == "UNMARKED" and marked:
                 continue
 
-            self.add_class_row(actual_date, subject, time, record)
+            class_type = get_slot_type(timetable_day, index)
+            self._current_index = index
+            self.add_class_row(actual_date, subject, time, record, class_type)
             added += 1
 
         if added == 0:
@@ -2543,8 +2746,8 @@ class TimetableScreen(Screen):
         ))
         self.timeline.add_widget(card)
 
-    def add_empty_time_row(self, time):
-        """Render an empty period so the full daily timeline stays visible."""
+    def add_empty_time_row(self, day, index, time):
+        """Render an empty period; in edit mode it becomes an add-class target."""
         row = BoxLayout(
             orientation="horizontal",
             spacing=10,
@@ -2565,12 +2768,25 @@ class TimetableScreen(Screen):
         time_label.bind(size=lambda i, v: setattr(i, "text_size", v))
         row.add_widget(time_label)
 
-        slot = Label(
-            text="",
-            color=UI_MUTED,
-            size_hint_x=1,
-        )
-        rounded_background(slot, (0.055, 0.065, 0.085, 1), 16)
+        if self.edit_mode:
+            slot = AppButton(
+                text="ADD CLASS\nTap to choose subject & type",
+                font_size=fs(15),
+                bold=True,
+                halign="center",
+                valign="middle",
+                background_color=UI_SURFACE_2,
+                size_hint_x=1,
+            )
+            slot.bind(on_press=lambda x, d=day, idx=index: self.open_slot_editor(d, idx))
+        else:
+            slot = Label(
+                text="",
+                color=UI_MUTED,
+                size_hint_x=1,
+            )
+            rounded_background(slot, (0.055, 0.065, 0.085, 1), 16)
+
         row.add_widget(slot)
         self.timeline.add_widget(row)
 
@@ -2608,7 +2824,7 @@ class TimetableScreen(Screen):
         row.add_widget(lunch)
         self.timeline.add_widget(row)
 
-    def add_class_row(self, actual_date, subject, time, record):
+    def add_class_row(self, actual_date, subject, time, record, class_type="LECTURE"):
         row = BoxLayout(
             orientation="horizontal",
             spacing=10,
@@ -2646,8 +2862,20 @@ class TimetableScreen(Screen):
             text = f"{subject}\n\nCURRENT CLASS"
             bg = (0.10, 0.35, 0.75, 1)
         else:
-            text = subject
+            text = f"{subject}\n\n{class_type}"
             bg = UI_SURFACE
+
+        if record and record.get("type"):
+            display_type = str(record.get("type")).upper()
+        else:
+            display_type = class_type
+
+        if not cancelled and current:
+            text = f"{subject}\n\n{display_type}  •  CURRENT CLASS"
+        elif not cancelled and record:
+            text = f"{subject}\n\n{display_type}  •  {record.get('status','').upper()}"
+        elif not cancelled:
+            text = f"{subject}\n\n{display_type}"
 
         button = AppButton(
             text=text,
@@ -2664,25 +2892,155 @@ class TimetableScreen(Screen):
 
         if not cancelled:
             button.bind(
-                on_press=lambda x, s=subject, d=date_string, t=time: self.open_attendance(s, d, t)
+                on_press=lambda x, s=subject, d=date_string, t=time, ct=class_type, idx=self._current_index:
+                    self.handle_class_press(s, d, t, ct, idx)
             )
         else:
             button.bind(
-                on_press=lambda x, s=subject, d=date_string, t=time: self.open_attendance(s, d, t)
+                on_press=lambda x, s=subject, d=date_string, t=time, ct=class_type, idx=self._current_index:
+                    self.handle_class_press(s, d, t, ct, idx)
             )
 
         row.add_widget(button)
         self.timeline.add_widget(row)
 
     # ========================================================
+    # TIMETABLE EDITING
+    # ========================================================
+
+    def toggle_edit_mode(self):
+        self.edit_mode = not self.edit_mode
+        self.edit_button.text = "DONE" if self.edit_mode else "EDIT"
+        self.refresh_timeline_only()
+
+    def handle_class_press(self, subject, class_date, time, class_type, index):
+        if self.edit_mode:
+            actual_date = date.fromisoformat(class_date)
+            timetable_day = self.get_timetable_day(actual_date)
+            if timetable_day:
+                self.open_slot_editor(timetable_day, index)
+        else:
+            self.open_attendance(subject, class_date, time, class_type)
+
+    def open_slot_editor(self, day, index):
+        entry = get_slot_entry(day, index)
+        current_subject = entry.get("subject", "")
+        current_type = entry.get("type", "") or "LECTURE"
+
+        content = BoxLayout(
+            orientation="vertical",
+            padding=15,
+            spacing=10
+        )
+
+        content.add_widget(Label(
+            text=f"{day.title()}\n{TIMES[index]}",
+            font_size=fs(20),
+            bold=True,
+            size_hint_y=None,
+            height=55
+        ))
+
+        subject_spinner = Spinner(
+            text=current_subject if current_subject else "FREE",
+            values=["FREE"] + SUBJECTS,
+            font_size=fs(17),
+            size_hint_y=None,
+            height=52
+        )
+
+        type_spinner = Spinner(
+            text=current_type if current_subject else "LECTURE",
+            values=CLASS_TYPES,
+            font_size=fs(17),
+            size_hint_y=None,
+            height=52
+        )
+
+        content.add_widget(Label(
+            text="SUBJECT",
+            font_size=fs(13),
+            bold=True,
+            color=UI_MUTED,
+            size_hint_y=None,
+            height=22
+        ))
+        content.add_widget(subject_spinner)
+
+        content.add_widget(Label(
+            text="CLASS TYPE",
+            font_size=fs(13),
+            bold=True,
+            color=UI_MUTED,
+            size_hint_y=None,
+            height=22
+        ))
+        content.add_widget(type_spinner)
+
+        buttons = BoxLayout(
+            orientation="horizontal",
+            spacing=8,
+            size_hint_y=None,
+            height=52
+        )
+
+        cancel = AppButton(text="CANCEL", font_size=fs(16))
+        clear = AppButton(text="CLEAR SLOT", font_size=fs(16), background_color=UI_WARNING)
+        save = AppButton(text="SAVE", font_size=fs(16), background_color=UI_ACCENT)
+
+        buttons.add_widget(cancel)
+        buttons.add_widget(clear)
+        buttons.add_widget(save)
+        content.add_widget(buttons)
+
+        popup = Popup(
+            title="EDIT TIMETABLE SLOT",
+            content=content,
+            size_hint=(0.92, 0.58),
+            auto_dismiss=False
+        )
+
+        cancel.bind(on_press=lambda x: popup.dismiss())
+        clear.bind(on_press=lambda x: self.save_timetable_slot(
+            popup, day, index, "", ""
+        ))
+
+        def do_save(_):
+            subject = subject_spinner.text
+            if subject == "FREE":
+                subject = ""
+            class_type = type_spinner.text if subject else ""
+            self.save_timetable_slot(popup, day, index, subject, class_type)
+
+        save.bind(on_press=do_save)
+        popup.open()
+
+    def save_timetable_slot(self, popup, day, index, subject, class_type):
+        app = App.get_running_app()
+        data = _normalise_timetable(getattr(app, "timetable_data", load_timetable()))
+        data.setdefault(day, [{"subject": "", "type": ""} for _ in TIMES])
+        data[day][index] = {
+            "subject": subject.strip(),
+            "type": class_type.upper() if subject.strip() else ""
+        }
+        save_timetable(data)
+        popup.dismiss()
+        self.refresh_grid()
+        try:
+            app.root.get_screen("home").update_dashboard()
+        except Exception:
+            pass
+
+    # ========================================================
     # ATTENDANCE
     # ========================================================
 
-    def open_attendance(self, subject, class_date, time):
+    def open_attendance(self, subject, class_date, time, class_type="LECTURE"):
         AttendancePopup(
             subject=subject,
             class_date=class_date,
             time=time,
+            class_type=class_type,
         ).open()
 
 class AssignmentsScreen(Screen):
@@ -3220,6 +3578,7 @@ class CollegeApp(App):
             load_attendance()
         )
         self.cancellations_data = load_cancellations()
+        self.timetable_data = load_timetable()
 
         manager = ScreenManager()
 
