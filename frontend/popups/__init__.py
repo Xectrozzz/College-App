@@ -1,2 +1,0 @@
-# Popups package init
-
