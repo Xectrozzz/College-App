@@ -8,7 +8,7 @@ from kivy.uix.popup import Popup
 from kivy.app import App
 from backend.constants import SUBJECT_INFO,CLASS_TYPES,REQUIRED_ATTENDANCE,SUBJECTS
 from backend.storage import get_teacher,save_teachers,get_subject_prep,save_subject_prep_for_subject,get_subject_assignments
-from backend.attendance_service import get_subject_stats,classes_can_skip
+from backend.attendance_service import get_subject_stats, get_type_stats, classes_can_skip
 from frontend.theme import *
 from frontend.widgets.buttons import AppButton,IconButton
 from frontend.widgets.navigation import BottomNav
@@ -20,18 +20,103 @@ class SubjectDetailsScreen(Screen):
     def card(self,h):c=BoxLayout(orientation="vertical",padding=(ui(20),ui(16)),spacing=ui(8),size_hint_y=None,height=ui(h));rounded_background(c,UI_SURFACE,22,UI_BORDER);return c
     def show_subject(self,s):self.subject=s;self.refresh()
     def refresh(self):
-        if not self.subject:return
-        s=self.subject;p,a,total,pct=get_subject_stats(s);pct=pct or 0;safe=pct>=75;col=UI_SUCCESS if safe else UI_DANGER;info=SUBJECT_INFO.get(s,{});self.box.clear_widgets()
-        top=BoxLayout(orientation="horizontal",size_hint_y=None,height=ui(60));back=IconButton(text="‹");back.bind(on_press=lambda x:setattr(self.manager,"current","subjects"));top.add_widget(back);t=BoxLayout(orientation="vertical");t.add_widget(self.lab(f"{s}  •  {info.get('credits',0)} CREDITS",11,UI_ACCENT,True,size_hint_y=None,height=ui(20)));t.add_widget(self.lab(s,19,UI_TEXT,True));top.add_widget(t);self.box.add_widget(top)
-        c=self.card(230);r=BoxLayout(orientation="horizontal",size_hint_y=None,height=ui(76));r.add_widget(self.lab("ATTENDANCE METRICS\n\n"+f"{pct:.0f}%",11,UI_ACCENT,True));r.add_widget(self.lab("REQUIRED\n75%",15,UI_TEXT,True,halign="right",size_hint_x=None,width=ui(80)));c.add_widget(r);counts=BoxLayout(orientation="horizontal",spacing=ui(8),size_hint_y=None,height=ui(62));
-        for name,val,color in [("PRESENT",p,UI_SUCCESS),("ABSENT",a,UI_DANGER),("MARKED",total,UI_ACCENT)]:
-            b=BoxLayout(orientation="vertical",padding=(ui(8),ui(5)));rounded_background(b,UI_SURFACE_2,14);b.add_widget(self.lab(name,10,color,True,halign="center"));b.add_widget(self.lab(str(val),18,UI_TEXT,True,halign="center"));counts.add_widget(b)
-        c.add_widget(counts);skip=classes_can_skip(p,total);msg=f"You can skip {skip} more {'class' if skip==1 else 'classes'} safely." if skip else (f"Need {max(0,int((.75*total-p)/(1-.75))+1)} consecutive attended classes to reach 75%." if total and pct<75 else "No safe skips remaining.");c.add_widget(self.lab(msg,12,col if skip or pct<75 else UI_MUTED,True,size_hint_y=None,height=ui(40)));self.box.add_widget(c)
-        # instructor
-        c=self.card(86);r=BoxLayout(orientation="horizontal");r.add_widget(self.lab("●  COURSE INSTRUCTOR\n"+str(get_teacher(s) or info.get("teacher") or "Teacher not set"),13,UI_TEXT,True));b=AppButton(text="EDIT",font_size=fs(11),background_color=UI_SURFACE_2,size_hint_x=None,width=ui(62));b.bind(on_press=lambda x:self.edit_teacher(s));r.add_widget(b);c.add_widget(r);self.box.add_widget(c)
-        self.box.add_widget(self.lab("SYLLABUS",18,UI_TEXT,True,size_hint_y=None,height=ui(28)));c=self.card(220);c.add_widget(self.lab("\n".join(f"• {x}" for x in info.get("syllabus",[])),13,UI_MUTED));self.box.add_widget(c)
-        prep=get_subject_prep(s);c=self.card(130);c.add_widget(self.lab("NEXT CLASS PREPARATION",17,UI_TEXT,True,size_hint_y=None,height=ui(26)));c.add_widget(self.lab("Bring: "+(prep.get("what_to_bring") or "Not set")+"\n"+(prep.get("notes") or "No notes"),12,UI_MUTED));e=AppButton(text="EDIT PREP",font_size=fs(10),background_color=UI_SURFACE_2,size_hint_y=None,height=ui(34));e.bind(on_press=lambda x:self.edit_prep(s));c.add_widget(e);self.box.add_widget(c)
-        assigns=get_subject_assignments(s);c=self.card(max(90,70+len(assigns)*50));c.add_widget(self.lab(f"ASSIGNMENTS ({len(assigns)})",17,UI_TEXT,True,size_hint_y=None,height=ui(26)));c.add_widget(self.lab("\n".join(f"• {a.get('title','Untitled')} — {a.get('due_date','No date')}" for a in assigns) or "No assignments recorded.",12,UI_MUTED));self.box.add_widget(c)
+        if not self.subject:
+            return
+        s = self.subject
+        p, a, total, pct = get_subject_stats(s)
+        pct = pct or 0
+        safe = pct >= REQUIRED_ATTENDANCE
+        col = UI_SUCCESS if safe else UI_DANGER
+        info = SUBJECT_INFO.get(s, {})
+        self.box.clear_widgets()
+
+        top = BoxLayout(orientation="horizontal", size_hint_y=None, height=ui(60))
+        back = IconButton(text="‹")
+        back.bind(on_press=lambda x: setattr(self.manager, "current", "subjects"))
+        top.add_widget(back)
+        t = BoxLayout(orientation="vertical")
+        t.add_widget(self.lab(f"{s}  •  {info.get('credits', 0)} CREDITS", 11, UI_ACCENT, True, size_hint_y=None, height=ui(20)))
+        t.add_widget(self.lab(s, 19, UI_TEXT, True))
+        top.add_widget(t)
+        self.box.add_widget(top)
+
+        c = self.card(230)
+        r = BoxLayout(orientation="horizontal", size_hint_y=None, height=ui(76))
+        r.add_widget(self.lab("ATTENDANCE METRICS\n\n" + f"{pct:.0f}%", 11, UI_ACCENT, True))
+        r.add_widget(self.lab("REQUIRED\n75%", 15, UI_TEXT, True, halign="right", size_hint_x=None, width=ui(80)))
+        c.add_widget(r)
+        counts = BoxLayout(orientation="horizontal", spacing=ui(8), size_hint_y=None, height=ui(62))
+        for name, val, color in [("PRESENT", p, UI_SUCCESS), ("ABSENT", a, UI_DANGER), ("MARKED", total, UI_ACCENT)]:
+            b = BoxLayout(orientation="vertical", padding=(ui(8), ui(5)))
+            rounded_background(b, UI_SURFACE_2, 14)
+            b.add_widget(self.lab(name, 10, color, True, halign="center"))
+            b.add_widget(self.lab(str(val), 18, UI_TEXT, True, halign="center"))
+            counts.add_widget(b)
+        c.add_widget(counts)
+        skip = classes_can_skip(p, total)
+        if skip:
+            msg = f"You can skip {skip} more {'class' if skip == 1 else 'classes'} safely."
+        elif total and pct < REQUIRED_ATTENDANCE:
+            needed = max(0, int((REQUIRED_ATTENDANCE / 100 * total - p) / (1 - REQUIRED_ATTENDANCE / 100)) + 1)
+            msg = f"Need {needed} consecutive attended classes to reach {REQUIRED_ATTENDANCE:.0f}%."
+        else:
+            msg = "No safe skips remaining."
+        c.add_widget(self.lab(msg, 12, col if skip or pct < REQUIRED_ATTENDANCE else UI_MUTED, True, size_hint_y=None, height=ui(40)))
+        self.box.add_widget(c)
+
+        type_rows = []
+        for class_type in CLASS_TYPES:
+            tp, ta, tt, tpct = get_subject_stats(s, class_type=class_type)
+            if tt:
+                type_rows.append((class_type, tp, ta, tt, tpct))
+        if type_rows:
+            c = self.card(max(120, 72 + len(type_rows) * 40))
+            c.add_widget(self.lab("ATTENDANCE BY CLASS TYPE", 17, UI_TEXT, True, size_hint_y=None, height=ui(26)))
+            for class_type, tp, ta, tt, tpct in type_rows:
+                c.add_widget(self.lab(
+                    f"{class_type.title()}   •   {tpct:.0f}%   •   {tp} Present  •  {ta} Absent  •  {tt} Marked",
+                    12, UI_MUTED, size_hint_y=None, height=ui(32)
+                ))
+            self.box.add_widget(c)
+
+        c = self.card(86)
+        r = BoxLayout(orientation="horizontal")
+        r.add_widget(self.lab(
+            "●  COURSE INSTRUCTOR\n" + str(get_teacher(s) or info.get("teacher") or "Teacher not set"),
+            13, UI_TEXT, True
+        ))
+        b = AppButton(text="EDIT", font_size=fs(11), background_color=UI_SURFACE_2, size_hint_x=None, width=ui(62))
+        b.bind(on_press=lambda x: self.edit_teacher(s))
+        r.add_widget(b)
+        c.add_widget(r)
+        self.box.add_widget(c)
+
+        self.box.add_widget(self.lab("SYLLABUS", 18, UI_TEXT, True, size_hint_y=None, height=ui(28)))
+        c = self.card(220)
+        c.add_widget(self.lab("\n".join(f"• {x}" for x in info.get("syllabus", [])), 13, UI_MUTED))
+        self.box.add_widget(c)
+
+        prep = get_subject_prep(s)
+        c = self.card(130)
+        c.add_widget(self.lab("NEXT CLASS PREPARATION", 17, UI_TEXT, True, size_hint_y=None, height=ui(26)))
+        c.add_widget(self.lab(
+            "Bring: " + (prep.get("what_to_bring") or "Not set") + "\n" + (prep.get("notes") or "No notes"),
+            12, UI_MUTED
+        ))
+        e = AppButton(text="EDIT PREP", font_size=fs(10), background_color=UI_SURFACE_2, size_hint_y=None, height=ui(34))
+        e.bind(on_press=lambda x: self.edit_prep(s))
+        c.add_widget(e)
+        self.box.add_widget(c)
+
+        assigns = get_subject_assignments(s)
+        c = self.card(max(90, 70 + len(assigns) * 50))
+        c.add_widget(self.lab(f"ASSIGNMENTS ({len(assigns)})", 17, UI_TEXT, True, size_hint_y=None, height=ui(26)))
+        c.add_widget(self.lab(
+            "\n".join(f"• {a.get('title', 'Untitled')} — {a.get('due_date', 'No date')}" for a in assigns) or "No assignments recorded.",
+            12, UI_MUTED
+        ))
+        self.box.add_widget(c)
+
     def edit_teacher(self,s):
         box=BoxLayout(orientation="vertical",padding=ui(16),spacing=ui(10));inp=TextInput(text=get_teacher(s) or "",multiline=False,font_size=fs(14),size_hint_y=None,height=ui(46));box.add_widget(self.lab("COURSE INSTRUCTOR",11,UI_MUTED,True));box.add_widget(inp);b=BoxLayout(orientation="horizontal",spacing=ui(8),size_hint_y=None,height=ui(44));cancel=AppButton(text="CANCEL",font_size=fs(11));save=AppButton(text="SAVE",font_size=fs(11),background_color=UI_ACCENT);b.add_widget(cancel);b.add_widget(save);box.add_widget(b);p=Popup(title="EDIT INSTRUCTOR",content=box,size_hint=(.9,.38),separator_height=0,background="",auto_dismiss=False);cancel.bind(on_press=lambda x:p.dismiss());save.bind(on_press=lambda x:self.save_teacher(p,s,inp.text));p.open()
     def save_teacher(self,p,s,v):

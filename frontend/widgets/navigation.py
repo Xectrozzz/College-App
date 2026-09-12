@@ -1,4 +1,5 @@
 from kivy.uix.boxlayout import BoxLayout
+from kivy.app import App
 from frontend.theme import *
 from frontend.widgets.buttons import AppButton
 
@@ -14,9 +15,7 @@ class BottomNav(BoxLayout):
             button.bind(on_press=lambda x, s=screen_name: self.go(s))
             self.add_widget(button)
     def go(self, screen_name):
-        root = self
-        while root.parent is not None:
-            root = root.parent
-        manager = getattr(root, "manager", None)
-        if manager:
-            manager.current = screen_name
+        app = App.get_running_app()
+        root = getattr(app, "root", None)
+        if root is not None and hasattr(root, "current"):
+            root.current = screen_name
