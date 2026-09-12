@@ -404,6 +404,52 @@ def get_teacher(subject):
     return saved.get(subject, SUBJECT_INFO.get(subject, {}).get("teacher", ""))
 
 
+# ============================================================
+# SUBJECT PREPARATION NOTES
+# ============================================================
+
+def get_subject_prep_file():
+    app = App.get_running_app()
+    return os.path.join(app.user_data_dir, "subject_prep.json")
+
+
+def load_subject_prep():
+    filename = get_subject_prep_file()
+    try:
+        if os.path.exists(filename):
+            with open(filename, "r") as file:
+                data = json.load(file)
+                return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("Could not load subject prep:", e)
+    return {}
+
+
+def save_subject_prep(data):
+    filename = get_subject_prep_file()
+    try:
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "w") as file:
+            json.dump(data, file, indent=4)
+    except Exception as e:
+        print("Could not save subject prep:", e)
+
+
+def get_subject_prep(subject):
+    data = load_subject_prep()
+    item = data.get(subject, {})
+    return item if isinstance(item, dict) else {}
+
+
+def save_subject_prep_for_subject(subject, what_to_bring, notes):
+    data = load_subject_prep()
+    data[subject] = {
+        "what_to_bring": what_to_bring.strip(),
+        "notes": notes.strip(),
+    }
+    save_subject_prep(data)
+
+
 def get_subject_assignments(subject):
     app = App.get_running_app()
     filename = os.path.join(app.user_data_dir, "assignments.json")
@@ -1264,6 +1310,39 @@ class HomeScreen(Screen):
         self.today_card.add_widget(today_open)
         content.add_widget(self.today_card)
 
+        # Today's attendance status
+        self.unmarked_card = BoxLayout(
+            orientation="vertical", padding=(12, 9), spacing=3,
+            size_hint_y=None, height=105
+        )
+        rounded_background(self.unmarked_card, UI_SURFACE, 18)
+        self.unmarked_label = Label(
+            text="0 unmarked classes today", font_size=fs(19), bold=True,
+            color=UI_TEXT, halign="left", valign="middle"
+        )
+        self.unmarked_label.bind(size=lambda i,v: setattr(i,"text_size",v))
+        self.unmarked_card.add_widget(self.unmarked_label)
+        content.add_widget(self.unmarked_card)
+
+        # Next class preparation
+        self.next_class_card = BoxLayout(
+            orientation="vertical", padding=(12, 9), spacing=3,
+            size_hint_y=None, height=180
+        )
+        rounded_background(self.next_class_card, UI_SURFACE, 18)
+        self.next_class_title = Label(
+            text="NEXT CLASS", font_size=fs(17), bold=True, color=UI_TEXT,
+            size_hint_y=None, height=25
+        )
+        self.next_class_text = Label(
+            text="No upcoming class", font_size=fs(15), color=UI_MUTED,
+            halign="left", valign="middle"
+        )
+        self.next_class_text.bind(size=lambda i,v: setattr(i,"text_size",v))
+        self.next_class_card.add_widget(self.next_class_title)
+        self.next_class_card.add_widget(self.next_class_text)
+        content.add_widget(self.next_class_card)
+
         # Quick links, two-column for portrait
         content.add_widget(Label(
             text="QUICK ACCESS", font_size=fs(17), bold=True, color=UI_TEXT,
@@ -1461,18 +1540,29 @@ class HomeScreen(Screen):
         key = attendance_key(class_date, subject, time, class_type)
         record = App.get_running_app().attendance_data.get(key)
 
+        class_type = class_info.get("type") or "LECTURE"
+        tp, ta, tt, tpct = get_subject_stats(subject, class_type)
+        can_miss = classes_can_skip(tp, tt) if tt else 0
+        miss_text = (
+            f"Can miss {can_miss} more {class_type.lower()}"
+            if tt else
+            f"No {class_type.lower()} attendance marked yet"
+        )
+
         if record:
             status = record.get("status", "").upper()
             self.quick_attendance_label.text = (
                 f"{state}  •  {subject}\n"
-                f"{time}  •  {class_info.get('type', 'LECTURE')}  •  MARKED {status}"
+                f"{time}  •  {class_type}  •  MARKED {status}\n"
+                f"{miss_text} while staying at {REQUIRED_ATTENDANCE}%+"
             )
             self.quick_present_button.disabled = True
             self.quick_absent_button.disabled = True
         else:
             self.quick_attendance_label.text = (
                 f"{state}  •  {subject}\n"
-                f"{time}  •  {class_info.get('type', 'LECTURE')}  •  Tap PRESENT or ABSENT"
+                f"{time}  •  {class_type}  •  Tap PRESENT or ABSENT\n"
+                f"{miss_text} while staying at {REQUIRED_ATTENDANCE}%+"
             )
             self.quick_present_button.disabled = False
             self.quick_absent_button.disabled = False
@@ -1554,7 +1644,96 @@ class HomeScreen(Screen):
 
         self.update_attendance_summary()
         self.update_quick_attendance()
+        self.update_unmarked_today()
+        self.update_next_class()
         self.update_upcoming_tasks()
+
+    def update_unmarked_today(self):
+        now = self.get_local_now()
+        today = now.date()
+        if get_semester_status(today):
+            self.unmarked_label.text = "0 unmarked classes today"
+            return
+
+        if today.weekday() == 5:
+            timetable_day = SPECIAL_SATURDAYS.get(today)
+        elif today.weekday() < 5:
+            timetable_day = today.strftime("%A").upper()
+        else:
+            timetable_day = None
+
+        if not timetable_day:
+            self.unmarked_label.text = "0 unmarked classes today"
+            return
+
+        unmarked = 0
+        for index in range(len(TIMES)):
+            subject = get_slot_subject(timetable_day, index)
+            if not subject or subject == "LUNCH BREAK":
+                continue
+            if is_class_cancelled(today.isoformat(), subject, TIMES[index]):
+                continue
+            class_type = get_slot_type(timetable_day, index) or "LECTURE"
+            key = attendance_key(today.isoformat(), subject, TIMES[index], class_type)
+            if key not in App.get_running_app().attendance_data:
+                unmarked += 1
+
+        self.unmarked_label.text = (
+            f"{unmarked} unmarked class{'es' if unmarked != 1 else ''} today"
+            + (" — mark them from Timetable" if unmarked else " — all caught up")
+        )
+
+    def update_next_class(self):
+        now = self.get_local_now()
+        today = now.date()
+        if get_semester_status(today):
+            self.next_class_text.text = "No upcoming class today."
+            return
+
+        if today.weekday() == 5:
+            timetable_day = SPECIAL_SATURDAYS.get(today)
+        elif today.weekday() < 5:
+            timetable_day = today.strftime("%A").upper()
+        else:
+            timetable_day = None
+
+        if not timetable_day:
+            self.next_class_text.text = "No upcoming class today."
+            return
+
+        current_minutes = now.hour * 60 + now.minute
+        candidate = None
+        for index in range(len(TIMES)):
+            subject = get_slot_subject(timetable_day, index)
+            if not subject or subject == "LUNCH BREAK":
+                continue
+            if is_class_cancelled(today.isoformat(), subject, TIMES[index]):
+                continue
+            try:
+                start, end = self.parse_time_slot(TIMES[index])
+            except Exception:
+                continue
+            if current_minutes < start:
+                candidate = (index, subject, TIMES[index], start)
+                break
+
+        if candidate is None:
+            self.next_class_text.text = "No more classes today."
+            return
+
+        index, subject, time, _ = candidate
+        class_type = get_slot_type(timetable_day, index) or "LECTURE"
+        prep = get_subject_prep(subject)
+        bring = prep.get("what_to_bring", "").strip()
+        notes = prep.get("notes", "").strip()
+        lines = [f"{subject}  •  {class_type}", time]
+        if bring:
+            lines.append(f"Bring: {bring}")
+        else:
+            lines.append("Bring: Not set yet")
+        if notes:
+            lines.append(f"Note: {notes}")
+        self.next_class_text.text = "\n".join(lines)
 
     def update_attendance_summary(self):
         total_present = 0
@@ -1584,11 +1763,29 @@ class HomeScreen(Screen):
                 self.upcoming_text.text = "Nothing pending — you're all caught up."
                 return
             lines = []
+            today = date.today()
             for a in pending[:3]:
-                lines.append(f"• {a.get('title','Untitled')}  ·  {a.get('due_date','No date')}")
+                title = a.get("title", "Untitled")
+                subject = a.get("subject", "No subject")
+                due_text = a.get("due_date", "No date")
+                status = ""
+                try:
+                    due = date.fromisoformat(due_text)
+                    days = (due - today).days
+                    if days < 0:
+                        status = "OVERDUE"
+                    elif days == 0:
+                        status = "DUE TODAY"
+                    elif days == 1:
+                        status = "DUE TOMORROW"
+                    else:
+                        status = f"DUE IN {days} DAYS"
+                except Exception:
+                    status = "DUE DATE UNKNOWN"
+                lines.append(f"{status}\n• {title}  ·  {subject}\n  {due_text}")
             if len(pending) > 3:
-                lines.append(f"+ {len(pending)-3} more")
-            self.upcoming_text.text = "\n".join(lines)
+                lines.append(f"+ {len(pending)-3} more pending")
+            self.upcoming_text.text = "\n\n".join(lines)
         except Exception:
             self.upcoming_text.text = "No assignments yet"
 
@@ -1955,6 +2152,26 @@ class SubjectDetailsScreen(Screen):
         teacher_card.add_widget(edit_teacher)
         self.content_box.add_widget(teacher_card)
 
+        prep_card = BoxLayout(
+            orientation="vertical", spacing=5, padding=10,
+            size_hint_y=None, height=145
+        )
+        self.prep_label = Label(
+            text="WHAT TO BRING / NEXT CLASS NOTES",
+            font_size=fs(17), bold=True, color=UI_TEXT,
+            halign="left", valign="middle", size_hint_y=None, height=28
+        )
+        self.prep_label.bind(size=lambda i,v: setattr(i,"text_size",v))
+        edit_prep = AppButton(
+            text="EDIT NEXT CLASS DETAILS", font_size=fs(18), bold=True,
+            size_hint_y=None, height=48
+        )
+        edit_prep.bind(on_press=lambda x: self.open_prep_editor())
+        self.prep_card = prep_card
+        prep_card.add_widget(self.prep_label)
+        prep_card.add_widget(edit_prep)
+        self.content_box.add_widget(prep_card)
+
         self.attendance_label = Label(
             text="",
             font_size=fs(19),
@@ -2084,6 +2301,14 @@ class SubjectDetailsScreen(Screen):
         else:
             self.teacher_label.text = "Teacher: Not set yet"
 
+        prep = get_subject_prep(subject)
+        bring = prep.get("what_to_bring", "").strip()
+        notes = prep.get("notes", "").strip()
+        prep_lines = []
+        prep_lines.append(f"Bring: {bring}" if bring else "Bring: Not set yet")
+        prep_lines.append(f"Next class notes: {notes}" if notes else "Next class notes: Not set yet")
+        self.prep_label.text = "WHAT TO BRING / NEXT CLASS NOTES\n" + "\n".join(prep_lines)
+
         present, absent, total, percentage = get_subject_stats(subject)
 
         if total == 0:
@@ -2151,6 +2376,47 @@ class SubjectDetailsScreen(Screen):
                     f"• {title}\n  Due: {due}  •  {priority}  •  {status}"
                 )
             self.assignments_label.text = "\n\n".join(lines)
+
+    def open_prep_editor(self):
+        if not self.current_subject:
+            return
+
+        current = get_subject_prep(self.current_subject)
+        content = BoxLayout(orientation="vertical", padding=15, spacing=10)
+
+        bring_input = TextInput(
+            text=current.get("what_to_bring", ""),
+            hint_text="What to bring (e.g. A2 sheets, drawing tools, model)",
+            multiline=True, font_size=fs(18), size_hint_y=None, height=85
+        )
+        notes_input = TextInput(
+            text=current.get("notes", ""),
+            hint_text="Next class notes / instructions",
+            multiline=True, font_size=fs(18), size_hint_y=None, height=85
+        )
+        buttons = BoxLayout(orientation="horizontal", spacing=8, size_hint_y=None, height=50)
+        cancel = AppButton(text="CANCEL", font_size=fs(18), bold=True)
+        save = AppButton(text="SAVE", font_size=fs(18), bold=True)
+        buttons.add_widget(cancel)
+        buttons.add_widget(save)
+        content.add_widget(Label(text="WHAT TO BRING", font_size=fs(16), bold=True, size_hint_y=None, height=25))
+        content.add_widget(bring_input)
+        content.add_widget(Label(text="NEXT CLASS NOTES", font_size=fs(16), bold=True, size_hint_y=None, height=25))
+        content.add_widget(notes_input)
+        content.add_widget(buttons)
+
+        popup = Popup(
+            title=f"NEXT CLASS • {self.current_subject}",
+            content=content, size_hint=(0.9, 0.65), auto_dismiss=False
+        )
+        cancel.bind(on_press=lambda x: popup.dismiss())
+        save.bind(on_press=lambda x: self.save_prep(popup, bring_input.text, notes_input.text))
+        popup.open()
+
+    def save_prep(self, popup, what_to_bring, notes):
+        save_subject_prep_for_subject(self.current_subject, what_to_bring, notes)
+        popup.dismiss()
+        self.show_subject(self.current_subject)
 
     def open_teacher_editor(self):
         if not self.current_subject:
