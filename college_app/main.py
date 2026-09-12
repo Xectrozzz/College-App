@@ -484,13 +484,13 @@ NO_INSTRUCTION_START = date(2026, 11, 9)
 NO_INSTRUCTION_END = date(2026, 11, 13)
 
 HOLIDAYS = {
-    date(2026, 8, 26): "HOLIDAY\\nId-e-Milad",
-    date(2026, 10, 2): "HOLIDAY\\nMahatma Gandhi Birthday",
-    date(2026, 10, 20): "HOLIDAY\\nDussehra",
-    date(2026, 11, 8): "HOLIDAY\\nDiwali",
-    date(2026, 11, 24): "HOLIDAY\\nGuru Nanak Birthday",
-    date(2026, 12, 25): "HOLIDAY\\nChristmas Day",
-    date(2027, 1, 26): "HOLIDAY\\nRepublic Day",
+    date(2026, 8, 26): "HOLIDAY\nId-e-Milad",
+    date(2026, 10, 2): "HOLIDAY\nMahatma Gandhi Birthday",
+    date(2026, 10, 20): "HOLIDAY\nDussehra",
+    date(2026, 11, 8): "HOLIDAY\nDiwali",
+    date(2026, 11, 24): "HOLIDAY\nGuru Nanak Birthday",
+    date(2026, 12, 25): "HOLIDAY\nChristmas Day",
+    date(2027, 1, 26): "HOLIDAY\nRepublic Day",
 }
 
 # Saturday instruction days from the academic calendar.
@@ -547,6 +547,53 @@ def get_attendance_file():
     )
 
 
+def attendance_key(class_date, subject, time, class_type=None):
+    """Return a unique attendance key that includes the class type."""
+    base = f"{class_date}|{subject}|{time}"
+    if class_type:
+        return f"{base}|{str(class_type).upper()}"
+    return base
+
+
+def infer_attendance_type(record):
+    """Recover the type of older records from the current timetable slot.
+
+    Older app versions stored attendance without a class type. If that record
+    belongs to a slot that is now configured as STUDIO/TUTORIAL/PRACTICAL,
+    recover that type instead of incorrectly treating it as a lecture.
+    """
+    current_type = str(record.get("type", "") or "").upper()
+    if current_type in CLASS_TYPES and current_type != "LECTURE":
+        return current_type
+
+    try:
+        class_date = date.fromisoformat(str(record.get("date", "")))
+        time = record.get("time", "")
+        subject = record.get("subject", "")
+        if time not in TIMES or not subject:
+            return current_type or "LECTURE"
+
+        weekday = class_date.strftime("%A").upper()
+        if weekday == "SUNDAY":
+            return current_type or "LECTURE"
+        timetable_day = (
+            SPECIAL_SATURDAYS.get(class_date)
+            if weekday == "SATURDAY"
+            else weekday
+        )
+        if timetable_day:
+            index = TIMES.index(time)
+            slot = get_slot_entry(timetable_day, index)
+            if slot.get("subject") == subject:
+                slot_type = str(slot.get("type", "") or "").upper()
+                if slot_type in CLASS_TYPES:
+                    return slot_type
+    except Exception:
+        pass
+
+    return current_type or "LECTURE"
+
+
 def load_attendance():
 
     filename = get_attendance_file()
@@ -557,16 +604,35 @@ def load_attendance():
 
             with open(filename, "r") as file:
                 data = json.load(file)
-            # Older attendance records had no class type. Preserve them as
-            # lectures so existing attendance remains valid.
+            # Migrate old 3-part keys and recover the class type from the
+            # timetable. This is especially important for previously marked
+            # Studio classes, which older versions could only store as
+            # generic attendance.
+            migrated = {}
             changed = False
             if isinstance(data, dict):
-                for record in data.values():
-                    if isinstance(record, dict) and not record.get("type"):
-                        record["type"] = "LECTURE"
+                for old_key, record in data.items():
+                    if not isinstance(record, dict):
+                        continue
+
+                    record = dict(record)
+                    class_type = infer_attendance_type(record)
+                    record["type"] = class_type
+
+                    # Always rewrite records using the type-aware key.
+                    new_key = attendance_key(
+                        record.get("date", ""),
+                        record.get("subject", ""),
+                        record.get("time", ""),
+                        class_type,
+                    )
+                    migrated[new_key] = record
+                    if old_key != new_key or record != data.get(old_key):
                         changed = True
-            if changed:
-                save_attendance(data)
+
+            if changed or migrated != data:
+                save_attendance(migrated)
+                return migrated
             return data
 
     except Exception:
@@ -1391,7 +1457,8 @@ class HomeScreen(Screen):
         self.quick_attendance_time = time
         self.quick_attendance_date = class_date
 
-        key = f"{class_date}|{subject}|{time}"
+        class_type = class_info.get("type") or "LECTURE"
+        key = attendance_key(class_date, subject, time, class_type)
         record = App.get_running_app().attendance_data.get(key)
 
         if record:
@@ -1415,12 +1482,6 @@ class HomeScreen(Screen):
             return
 
         app = App.get_running_app()
-        key = (
-            f"{self.quick_attendance_date}|"
-            f"{self.quick_attendance_subject}|"
-            f"{self.quick_attendance_time}"
-        )
-
         class_type = "LECTURE"
         try:
             info = self.get_home_attendance_class()
@@ -1428,6 +1489,13 @@ class HomeScreen(Screen):
                 class_type = info.get("type") or "LECTURE"
         except Exception:
             pass
+
+        key = attendance_key(
+            self.quick_attendance_date,
+            self.quick_attendance_subject,
+            self.quick_attendance_time,
+            class_type,
+        )
 
         app.attendance_data[key] = {
             "subject": self.quick_attendance_subject,
@@ -2268,8 +2336,16 @@ class AttendancePopup(Popup):
                 "time": self.time
             }
             # A cancelled class should never remain marked present/absent.
-            attendance_key = key
-            app.attendance_data.pop(attendance_key, None)
+            # Remove both the current type-aware key and any legacy key.
+            class_type = self.class_type or "LECTURE"
+            app.attendance_data.pop(
+                attendance_key(self.class_date, self.subject, self.time, class_type),
+                None,
+            )
+            app.attendance_data.pop(
+                attendance_key(self.class_date, self.subject, self.time),
+                None,
+            )
             save_attendance(app.attendance_data)
 
         save_cancellations(cancellations)
@@ -2286,10 +2362,11 @@ class AttendancePopup(Popup):
 
         app = App.get_running_app()
 
-        key = (
-            f"{self.class_date}|"
-            f"{self.subject}|"
-            f"{self.time}"
+        key = attendance_key(
+            self.class_date,
+            self.subject,
+            self.time,
+            self.class_type,
         )
 
         app.attendance_data[key] = {
@@ -2588,8 +2665,24 @@ class TimetableScreen(Screen):
         return [get_slot_subject(timetable_day, i) for i in range(len(TIMES))]
 
     def attendance_record(self, actual_date, subject, time):
-        key = f"{actual_date.isoformat()}|{subject}|{time}"
-        return App.get_running_app().attendance_data.get(key)
+        app = App.get_running_app()
+        timetable_day = self.get_timetable_day(actual_date)
+        class_type = "LECTURE"
+        if timetable_day and time in TIMES:
+            index = TIMES.index(time)
+            class_type = get_slot_type(timetable_day, index) or "LECTURE"
+
+        key = attendance_key(
+            actual_date.isoformat(), subject, time, class_type
+        )
+        record = app.attendance_data.get(key)
+        if record is not None:
+            return record
+
+        # Compatibility fallback for a legacy record that may not have been
+        # migrated yet.
+        legacy = attendance_key(actual_date.isoformat(), subject, time)
+        return app.attendance_data.get(legacy)
 
     def update_filter_buttons(self):
         for mode, button in self.filter_buttons.items():
@@ -3574,11 +3667,11 @@ class CollegeApp(App):
 
     def build(self):
 
-        self.attendance_data = (
-            load_attendance()
-        )
-        self.cancellations_data = load_cancellations()
+        # Load the timetable first so attendance migration can recover the
+        # type of older Studio/Tutorial/Practical records.
         self.timetable_data = load_timetable()
+        self.attendance_data = load_attendance()
+        self.cancellations_data = load_cancellations()
 
         manager = ScreenManager()
 
